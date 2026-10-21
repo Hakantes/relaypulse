@@ -15,6 +15,7 @@ from relaypulse.models import (
     DLQEntry
 )
 from relaypulse.storage import SQLiteEventStore
+from relaypulse.validator import validate_destination_url
 
 
 def create_app(db_path: Optional[Path] = None) -> FastAPI:
@@ -35,6 +36,29 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
 
     @app.post("/v1/events", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED, tags=["Events"])
     async def create_event(req: CreateEventRequest):
+        # 1. SSRF & Scheme Validation
+        is_valid_url, err = validate_destination_url(req.destination_url)
+        if not is_valid_url:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=err)
+
+        # 2. Idempotency Check
+        if req.idempotency_key:
+            existing = store.get_by_idempotency_key(req.idempotency_key)
+            if existing:
+                return EventResponse(
+                    id=existing.id,
+                    destination_url=existing.destination_url,
+                    payload=existing.payload,
+                    status=existing.status,
+                    attempts=existing.attempts,
+                    max_retries=existing.max_retries,
+                    created_at=existing.created_at,
+                    updated_at=existing.updated_at,
+                    last_error=existing.last_error,
+                    last_status_code=existing.last_status_code,
+                    idempotency_key=existing.idempotency_key
+                )
+
         event_id = f"evt_{uuid.uuid4().hex[:12]}"
         event = WebhookEvent(
             id=event_id,
@@ -42,6 +66,7 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
             payload=req.payload,
             secret=req.secret or "default_secret",
             max_retries=req.max_retries,
+            idempotency_key=req.idempotency_key,
             status=EventStatus.PENDING
         )
         store.save_event(event)
@@ -54,7 +79,8 @@ def create_app(db_path: Optional[Path] = None) -> FastAPI:
             attempts=event.attempts,
             max_retries=event.max_retries,
             created_at=event.created_at,
-            updated_at=event.updated_at
+            updated_at=event.updated_at,
+            idempotency_key=event.idempotency_key
         )
 
     @app.get("/v1/events", response_model=List[EventResponse], tags=["Events"])

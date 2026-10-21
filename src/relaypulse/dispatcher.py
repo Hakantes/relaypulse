@@ -11,6 +11,7 @@ from relaypulse.models import WebhookEvent, EventStatus
 from relaypulse.crypto import generate_signature
 from relaypulse.storage import SQLiteEventStore
 from relaypulse.circuit import CircuitBreakerManager
+from relaypulse.validator import validate_destination_url
 
 
 def calculate_backoff(attempt: int, base_seconds: float = 1.0, max_seconds: float = 120.0) -> float:
@@ -35,7 +36,19 @@ class WebhookDispatcher:
 
     async def dispatch_event(self, event: WebhookEvent) -> Tuple[bool, Optional[int], Optional[str]]:
         """Executes delivery of a single webhook event."""
-        # 1. Check Circuit Breaker
+        # 1. SSRF & URL Validation Check
+        is_valid, url_err = validate_destination_url(event.destination_url)
+        if not is_valid:
+            self.store.update_event_status(
+                event_id=event.id,
+                status=EventStatus.DLQ,
+                attempts=event.attempts + 1,
+                next_retry_at=0.0,
+                last_error=f"Blocked invalid destination URL: {url_err}"
+            )
+            return False, None, url_err
+
+        # 2. Check Circuit Breaker
         if not self.circuit_manager.can_dispatch(event.destination_url):
             err_msg = f"Circuit breaker is OPEN for destination {event.destination_url}. Delivery paused."
             backoff = calculate_backoff(event.attempts + 1)
@@ -48,7 +61,12 @@ class WebhookDispatcher:
             )
             return False, None, err_msg
 
-        # 2. Serialize payload and compute signature
+        # 3. Atomically claim event to prevent concurrent double-delivery race condition
+        claimed = self.store.claim_event_for_delivery(event.id)
+        if not claimed and event.status != EventStatus.DELIVERING:
+            return False, None, "Event already claimed by another worker"
+
+        # 4. Serialize payload and compute signature
         payload_bytes = json.dumps(event.payload).encode("utf-8")
         sig_header, ts = generate_signature(payload_bytes, event.secret)
 

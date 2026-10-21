@@ -33,6 +33,7 @@ class WebhookEvent(BaseModel):
     updated_at: float = Field(default_factory=time.time)
     last_error: Optional[str] = None
     last_status_code: Optional[int] = None
+    idempotency_key: Optional[str] = None
 
 
 class CreateEventRequest(BaseModel):
@@ -40,6 +41,7 @@ class CreateEventRequest(BaseModel):
     payload: Dict[str, Any]
     secret: Optional[str] = Field(default="default_secret", description="HMAC shared secret")
     max_retries: int = 5
+    idempotency_key: Optional[str] = Field(default=None, description="Optional key to prevent duplicate ingestion")
 
 
 class EventResponse(BaseModel):
@@ -53,6 +55,7 @@ class EventResponse(BaseModel):
     updated_at: float
     last_error: Optional[str] = None
     last_status_code: Optional[int] = None
+    idempotency_key: Optional[str] = None
 
 
 class DLQEntry(BaseModel):

@@ -1,10 +1,10 @@
-# RelayPulse ⚡
+# RelayPulse
 
 [![CI Status](https://github.com/Hakantes/relaypulse/actions/workflows/ci.yml/badge.svg)](https://github.com/Hakantes/relaypulse/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.12+](https://img.shields.io/badge/python-3.12%2B-brightgreen.svg)](https://www.python.org/)
 
-**Resilient webhook delivery engine with HMAC-SHA256 signatures, exponential backoff, circuit breaking, and dead-letter queue replay.**
+**Webhook delivery engine with HMAC-SHA256 signatures, SSRF protection, circuit breaking, and dead-letter queue replay.**
 
 ---
 
@@ -12,17 +12,20 @@
 
 Reliable webhook delivery is a core operational requirement for SaaS products (e.g., Stripe, GitHub, Shopify). Yet engineering teams frequently encounter common operational pitfalls:
 1. **The Synchronous Delivery Trap:** Disagreeable third-party receivers or slow networks hold HTTP worker threads hostage, triggering cascading timeouts and crashing upstream APIs.
-2. **The "Poison Message" Black Box:** When a webhook payload fails repeatedly due to schema bugs or receiver HTTP 500s, messages are dropped silently or endlessly retried in naive loops.
-3. **Thundering Herds & Subscriber Overload:** During customer server outages, naive dispatchers hammer the failing receiver with thousands of concurrent retries, exacerbating downtime.
+2. **SSRF Vulnerabilities:** Unvalidated webhook destination URLs permit internal network scanning and cloud metadata theft (`http://169.254.169.254`).
+3. **The "Poison Message" Black Box:** When a webhook payload fails repeatedly due to schema bugs or receiver HTTP 500s, messages are dropped silently or endlessly retried in naive loops.
+4. **Thundering Herds & Subscriber Overload:** During customer server outages, naive dispatchers hammer the failing receiver with thousands of concurrent retries, exacerbating downtime.
 
 ## The Solution: RelayPulse
 
-**RelayPulse** is a lightweight, zero-external-dependency webhook dispatcher and control plane:
-- **Asynchronous Non-Blocking Dispatch:** Instantly accepts events (`202 Accepted`) and processes delivery via background workers.
+**RelayPulse** is a lightweight webhook dispatcher and control plane:
+- **Asynchronous Non-Blocking Dispatch:** Accepts events (`202 Accepted`) and processes delivery via background workers.
+- **Strict SSRF Guardrails:** Validates all destination URLs, strictly blocking private subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) and cloud metadata services (`169.254.0.0/16`).
+- **Idempotency Deduplication:** Supports unique `Idempotency-Key` headers to ensure identical events are not duplicated or double-billed.
 - **Timing-Safe HMAC-SHA256 Signatures:** Cryptographically signs every payload with timestamped headers (`X-RelayPulse-Signature: t=...,v1=...`), preventing tampering and replay attacks.
 - **Per-Destination Circuit Breakers:** Automatically detects failing receivers and trips to `OPEN` state, pausing traffic to the struggling subscriber while continuing normal deliveries to healthy endpoints.
 - **Exponential Backoff with Full Jitter:** Retries transient failures with randomized jitter ($T = \min(\text{base} \cdot 2^{\text{attempt}} + \text{jitter}, \text{max})$), preventing thundering herds.
-- **Durable Embedded Queue:** SQLite Write-Ahead Log (WAL) mode guarantees zero message loss across application restarts without requiring external Redis or Celery clusters.
+- **Durable Embedded Queue:** SQLite Write-Ahead Log (WAL) mode guarantees message persistence across application restarts without requiring external Redis or Celery clusters.
 - **Dead-Letter Queue (DLQ) Control Plane:** Captures failed responses, HTTP status codes, and error traces, with instant one-command replay via REST API or CLI.
 
 ---

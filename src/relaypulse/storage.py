@@ -35,10 +35,12 @@ class SQLiteEventStore:
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     last_error TEXT,
-                    last_status_code INTEGER
+                    last_status_code INTEGER,
+                    idempotency_key TEXT
                 );
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_status_retry ON webhook_events(status, next_retry_at);")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_idempotency ON webhook_events(idempotency_key) WHERE idempotency_key IS NOT NULL;")
             conn.commit()
 
     def save_event(self, event: WebhookEvent) -> None:
@@ -48,8 +50,8 @@ class SQLiteEventStore:
                 INSERT OR REPLACE INTO webhook_events (
                     id, destination_url, payload, secret, status, attempts,
                     max_retries, next_retry_at, created_at, updated_at,
-                    last_error, last_status_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_error, last_status_code, idempotency_key
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.id,
@@ -63,10 +65,33 @@ class SQLiteEventStore:
                     event.created_at,
                     event.updated_at,
                     event.last_error,
-                    event.last_status_code
+                    event.last_status_code,
+                    event.idempotency_key
                 )
             )
             conn.commit()
+
+    def get_by_idempotency_key(self, idempotency_key: str) -> Optional[WebhookEvent]:
+        with self._get_connection() as conn:
+            row = conn.execute("SELECT * FROM webhook_events WHERE idempotency_key = ?", (idempotency_key,)).fetchone()
+            if not row:
+                return None
+            return self._row_to_event(row)
+
+    def claim_event_for_delivery(self, event_id: str) -> bool:
+        """Atomically transitions an event from PENDING/RETRYING to DELIVERING to prevent race conditions."""
+        now = time.time()
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                """
+                UPDATE webhook_events
+                SET status = ?, updated_at = ?
+                WHERE id = ? AND (status = ? OR status = ?)
+                """,
+                (EventStatus.DELIVERING.value, now, event_id, EventStatus.PENDING.value, EventStatus.RETRYING.value)
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     def get_event(self, event_id: str) -> Optional[WebhookEvent]:
         with self._get_connection() as conn:
@@ -158,6 +183,7 @@ class SQLiteEventStore:
             return cur.rowcount > 0
 
     def _row_to_event(self, row: sqlite3.Row) -> WebhookEvent:
+        keys = row.keys()
         return WebhookEvent(
             id=row["id"],
             destination_url=row["destination_url"],
@@ -170,5 +196,6 @@ class SQLiteEventStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             last_error=row["last_error"],
-            last_status_code=row["last_status_code"]
+            last_status_code=row["last_status_code"],
+            idempotency_key=row["idempotency_key"] if "idempotency_key" in keys else None
         )
